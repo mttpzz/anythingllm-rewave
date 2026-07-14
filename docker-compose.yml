@@ -1,0 +1,30 @@
+services:
+  anythingllm:
+    image: mintplexlabs/anythingllm:latest
+    container_name: anythingllm
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    cap_add:
+      - SYS_ADMIN            # required by the headless browser of the web-browsing skill
+    environment:
+      - STORAGE_DIR=/app/server/storage
+      # LLM provider: Anthropic
+      - LLM_PROVIDER=anthropic
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      # Model comes from .env (ANTHROPIC_MODEL_PREF), single source of truth.
+      - ANTHROPIC_MODEL_PREF=${ANTHROPIC_MODEL_PREF}
+      # Multi-user: after first boot set the admin password in the UI
+      # and enable multi-user mode (Settings -> Security/Users).
+    volumes:
+      # Persistent AnythingLLM storage (DB, documents, vector cache, config)
+      - ./storage:/app/server/storage
+      # SharePoint folder exposed to the File System agent.
+      # MUST live under anythingllm-fs/: the skill cannot access anything outside it.
+      # Long syntax is used so a Windows source path (drive-letter colon, spaces) works.
+      # Host path comes from SHAREPOINT_MOUNT_PATH in .env:
+      #   Windows test -> OneDrive-synced SharePoint folder (no rclone)
+      #   Ubuntu prod  -> rclone mount point (/mnt/sharepoint)
+      - type: bind
+        source: ${SHAREPOINT_MOUNT_PATH}
+        target: /app/server/storage/anythingllm-fs/sharepoint
