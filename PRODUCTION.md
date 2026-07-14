@@ -9,16 +9,23 @@ and **Ubuntu production** are called out in `▶ Windows vs Ubuntu` boxes.
 ## 0. Key idea: how SharePoint becomes a local folder
 
 The assistant does not talk to SharePoint via API: it **sees a local folder** kept in sync with
-SharePoint. What performs the sync differs between the two environments:
+SharePoint. A **OneDrive client** performs the sync in both environments — only *which* client
+differs:
 
 | Aspect | Windows test | Ubuntu production |
 |---|---|---|
-| Who syncs SharePoint ↔ local folder | **OneDrive** client (already installed) | **rclone** (FUSE mount) |
+| Who syncs SharePoint ↔ local folder | **OneDrive** client (Microsoft, already installed) | **abraunegg/onedrive** (open-source Linux client) |
+| Sync type | real local sync (files on disk) | real local sync (files on disk) |
 | Host folder | `C:\Users\Matteo\Rewave Srl\Rewave - Information Technology` | `/mnt/sharepoint` |
 | `SHAREPOINT_MOUNT_PATH` in `.env` | that Windows path | `/mnt/sharepoint` |
 | Bind-mount into the container | same | same |
 | Path seen by the agent in the container | `/app/server/storage/anythingllm-fs/sharepoint` | same |
 | "File System" skill config in the UI | toggle **On** only | toggle **On** only (identical) |
+
+> **Why abraunegg and not rclone**: rclone gives a FUSE *network mount* (files fetched on
+> demand). The abraunegg client does a **real bidirectional sync** — files live on local disk,
+> so reads by the File System skill are fast and there is no FUSE/`allow_other` plumbing. Cost:
+> disk space equal to the synced set (limit it with a `sync_list`).
 
 > **How the File System skill works on Docker**: it operates **only** inside
 > `/app/server/storage/anythingllm-fs/`. On Docker there is **no folder picker and no read/write
@@ -26,7 +33,7 @@ SharePoint. What performs the sync differs between the two environments:
 > **exactly the bind-mounts** you place under `anythingllm-fs/`, and read/write is decided by the
 > **volume** (`:ro` = read-only; no suffix = read/write). So: in the UI you just flip the toggle;
 > the `sharepoint` folder is already accessible because it is bind-mounted. Only *who syncs it*
-> with SharePoint changes (OneDrive on Windows, rclone on Ubuntu).
+> with SharePoint changes (Microsoft OneDrive on Windows, abraunegg on Ubuntu).
 
 ---
 
@@ -56,90 +63,98 @@ newgrp docker    # or log out/in
 docker run hello-world   # verify
 ```
 
-### 1.3 Install FUSE (needed by rclone mount)
+### 1.3 Install the OneDrive client (abraunegg)
+Microsoft ships **no** official OneDrive client for Linux. Use **abraunegg/onedrive** (the
+de-facto Linux client; supports SharePoint document libraries). Install the up-to-date build
+from the OpenSuSE Build Service repo (the Ubuntu-archive package is often stale):
 ```bash
-sudo apt install -y fuse3
-# enable allow_other (the container needs to read the mounted folder):
-sudo sed -i 's/^#user_allow_other/user_allow_other/' /etc/fuse.conf
-grep user_allow_other /etc/fuse.conf   # must be UNcommented
+wget -qO - https://download.opensuse.org/repositories/home:/npreining:/debian-ubuntu-onedrive/xUbuntu_$(lsb_release -rs)/Release.key | sudo gpg --dearmor -o /usr/share/keyrings/obs-onedrive.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/obs-onedrive.gpg] https://download.opensuse.org/repositories/home:/npreining:/debian-ubuntu-onedrive/xUbuntu_$(lsb_release -rs)/ ./" | sudo tee /etc/apt/sources.list.d/onedrive.list
+sudo apt update && sudo apt install -y onedrive
+onedrive --version    # expect v2.5.x or newer
 ```
 
 ---
 
-## 2. rclone: mount the SharePoint library
+## 2. OneDrive client: sync the SharePoint library
 
-> ▶ **Windows vs Ubuntu**: this whole section **exists only in production**. On Windows rclone
-> is not needed: the folder is already synced by the OneDrive client.
+> ▶ **Windows vs Ubuntu**: this whole section **exists only in production**. On Windows the
+> Microsoft OneDrive client already syncs the folder — nothing to install.
 
-### 2.1 Install rclone
+### 2.1 Prepare the sync folder
+The client (running as user `ubuntu`) must own the sync folder:
 ```bash
-curl https://rclone.org/install.sh | sudo bash
-rclone version
+sudo mkdir -p /mnt/sharepoint
+sudo chown ubuntu:ubuntu /mnt/sharepoint
 ```
 
-### 2.2 Configure the SharePoint remote (headless)
-The server has no browser, so OAuth authorization is done from a PC with a browser.
-
-On Ubuntu:
+### 2.2 Authenticate (headless)
+The server has no browser, so OAuth is done from a PC with a browser.
 ```bash
-rclone config
+onedrive
 ```
-- `n` (new remote) → name: `rewaveSP`
-- Storage: search for **OneDrive** (`onedrive`)
-- `client_id` / `client_secret`: leave empty (uses rclone defaults) — or enter those of a
-  dedicated Entra app if IT requires it
-- Region: `1` (Microsoft Cloud Global)
-- `Edit advanced config?` → `n`
-- `Use auto config?` → **`n`** (headless)
-- rclone prints a command like: `rclone authorize "onedrive"`
+- The client prints a long **login URL**. Open it on a PC/Mac with a browser.
+- Sign in with the **dedicated M365 service account** (the one with access to the library).
+- After consent the browser lands on a **blank page** — copy the full URL from the address bar
+  and paste it back into the terminal.
 
-On a PC (Windows/Mac) with rclone installed **and** a browser, run that command, sign in with
-**the dedicated M365 service account**, and copy the JSON token rclone prints. Paste it back
-into the wizard on Ubuntu.
+> ⚠️ Requires the **admin/service account** credentials + tenant consent. If the account is not
+> ready, do this step later; everything after depends on it.
 
-- Connection type: choose **SharePoint site** (`Sharepoint site name or URL` /
-  "Search for a Sharepoint site"), look up the site that contains the
-  **Rewave - Information Technology** library
-- Select the correct **drive** (document library) from the list
-- Confirm and quit (`q`)
-
-### 2.3 Verify access
+### 2.3 Find the SharePoint library drive_id
+The default sync targets the account's *personal* OneDrive. To sync a **SharePoint document
+library** instead, get its `drive_id`:
 ```bash
-rclone lsd rewaveSP:               # list top-level folders of the library
-rclone ls rewaveSP: | head         # list files
+onedrive --get-O365-drive-id 'Rewave - Information Technology'
 ```
-If you need to point at a specific subfolder, note the path (e.g. `rewaveSP:` for the library
-root, or `rewaveSP:SubFolder`).
+Copy the `drive_id` value from the output.
 
-### 2.4 Persistent mount via systemd
-The repo contains `deploy/rclone-sharepoint.service`. Adjust it:
-- `User=` / `Group=` = the server user (e.g. `ubuntu`)
-- `Environment=RCLONE_CONFIG=` = path to `rclone.conf` (check with `rclone config file`)
-- in the `ExecStart` line, replace `rewaveSP:"Documenti/CartellaTarget"` with the real path
-  verified in 2.3 (e.g. just `rewaveSP:`)
+### 2.4 Configure
+Create `~/.config/onedrive/config` (template in the repo: `deploy/onedrive-config.example`):
+```ini
+sync_dir = "/mnt/sharepoint"
+drive_id = "<drive_id from 2.3>"
+```
+Optional: limit which subfolders sync (saves disk on large libraries) with
+`~/.config/onedrive/sync_list` — one path per line.
+
+### 2.5 First sync (by hand, once)
+Always dry-run first, then the real sync:
+```bash
+onedrive --sync --dry-run --verbose      # review what it WOULD do
+onedrive --sync --verbose                # first full sync (can take a while)
+ls -la /mnt/sharepoint                    # must show the real library files
+```
+
+### 2.6 Persistent sync via systemd
+The repo contains `deploy/onedrive-sharepoint.service` (runs `onedrive --monitor`). Adjust it:
+- `User=` / `Group=` = the server user that ran auth (e.g. `ubuntu`)
+- `--confdir=` path = that user's `~/.config/onedrive`
+- keep `UMask=0022` (so synced files are `644`/`755` and the container can read them)
 
 Then:
 ```bash
-sudo mkdir -p /mnt/sharepoint
-sudo cp deploy/rclone-sharepoint.service /etc/systemd/system/
+sudo cp deploy/onedrive-sharepoint.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now rclone-sharepoint
-systemctl status rclone-sharepoint      # must be active (running)
-ls -la /mnt/sharepoint                   # must show the real library files
+sudo systemctl enable --now onedrive-sharepoint
+systemctl status onedrive-sharepoint     # must be active (running)
+journalctl -u onedrive-sharepoint -f     # watch sync activity (Ctrl-C to exit)
 ```
-Write test (critical — needed for file creation):
+Write test (critical — needed for file creation by the agent):
 ```bash
-echo "test $(date)" | sudo tee /mnt/sharepoint/_rclone-write-test.txt
-# wait a few seconds and confirm the file appears on SharePoint web,
+echo "test $(date)" > /mnt/sharepoint/_od-write-test.txt
+# wait for the monitor cycle, then confirm the file appears on SharePoint web,
 # then remove it:
-rm /mnt/sharepoint/_rclone-write-test.txt
+rm /mnt/sharepoint/_od-write-test.txt
 ```
-If the write fails: check that the mount uses `--vfs-cache-mode writes` and that the service
-account has write permission on the library.
+If writes don't propagate: check the service is running, the account has write permission on the
+library, and there are no `skip_*` rules excluding the file.
 
-### 2.5 Permissions of the rclone config file (holds the token)
+### 2.7 Permissions of the OneDrive config/token
+The refresh token lives under `~/.config/onedrive/`. Lock it down:
 ```bash
-chmod 600 ~/.config/rclone/rclone.conf
+chmod 700 ~/.config/onedrive
+chmod 600 ~/.config/onedrive/refresh_token 2>/dev/null || true
 ```
 
 ---
@@ -152,7 +167,7 @@ e.g. into `/opt/anythingllm-rewave`.
 
 ### 3.2 Create the production `.env`
 > ▶ **Windows vs Ubuntu**: the test `.env` (Windows path) **must not be copied to prod**. In
-> production `SHAREPOINT_MOUNT_PATH` is the rclone mount.
+> production `SHAREPOINT_MOUNT_PATH` is the onedrive sync folder.
 
 ```bash
 cat > .env <<'EOF'
@@ -160,7 +175,7 @@ cat > .env <<'EOF'
 ANTHROPIC_API_KEY=sk-ant-xxxxxxxxxxxxxxxxxxxxxxxx
 # Default model
 ANTHROPIC_MODEL_PREF=claude-sonnet-4-6
-# SharePoint folder mounted by rclone
+# SharePoint folder synced by the OneDrive client
 SHAREPOINT_MOUNT_PATH=/mnt/sharepoint
 EOF
 chmod 600 .env
@@ -180,7 +195,8 @@ UI reachable at `http://<server-IP>:3001` (LAN only for now; HTTPS at step 8).
 ```bash
 docker exec -it anythingllm ls -la /app/server/storage/anythingllm-fs/sharepoint
 ```
-Must show the same files as `/mnt/sharepoint`.
+Must show the same files as `/mnt/sharepoint`. If empty or permission-denied: the container user
+can't read the files → confirm `UMask=0022` on the onedrive service and re-sync.
 
 ---
 
@@ -243,7 +259,7 @@ on Desktop). So:
    - `:ro` on the volume → read-only (no creation).
 
 > ▶ **Windows vs Ubuntu**: **identical**. Both are just the On toggle; the folder comes from the
-> bind-mount. Only what fills it changes (OneDrive on Windows, rclone on Ubuntu).
+> bind-mount. Only what fills it changes (Microsoft OneDrive on Windows, abraunegg on Ubuntu).
 
 > ⚠️ **Read + create vs modify/delete**: a read/write volume also allows modifying and deleting
 > existing files; there is no "create-only" level (neither in the UI nor via the volume, if write
@@ -291,21 +307,22 @@ on Desktop). So:
 
 ## 9. Security (production)
 
-- **Shared identity**: all employees act with the permissions of the rclone service account on
+- **Shared identity**: all employees act with the permissions of the OneDrive service account on
   the library. Give that account access **only** to the target library.
-- **Secrets**: `.env` and `rclone.conf` with mode `600`, out of the git repo (already in
-  `.gitignore`).
+- **Secrets**: `.env` (mode `600`), and `~/.config/onedrive/` (mode `700`, holds the refresh
+  token) out of the git repo (already in `.gitignore`).
 - **HTTPS** mandatory; instance reachable from LAN/VPN only.
 - **Backups**: back up the `./storage` folder (holds the user DB, workspaces, config).
-- **Rotation**: schedule periodic rotation of the Anthropic API key and the rclone token.
+- **Rotation**: schedule periodic rotation of the Anthropic API key; re-auth the OneDrive client
+  if the service-account credentials rotate.
 - **Updates**: `docker compose pull && docker compose up -d` to update the image; review the
-  AnythingLLM release notes before updating in prod.
+  AnythingLLM release notes before updating in prod. Update the onedrive client via `apt`.
 
 ---
 
 ## 10. End-to-end verification (production)
 
-1. `systemctl status rclone-sharepoint` → active; `ls /mnt/sharepoint` → real files.
+1. `systemctl status onedrive-sharepoint` → active; `ls /mnt/sharepoint` → real files.
 2. `docker exec -it anythingllm ls /app/server/storage/anythingllm-fs/sharepoint` → same files.
 3. Basic chat → OK response (Anthropic, `claude-sonnet-4-6`).
 4. `@agent search the web for <recent news>` → results with sources.
@@ -322,11 +339,14 @@ on Desktop). So:
 Things you did not do in Windows test (or did differently) that must be done in prod:
 
 - [ ] Install Docker + Compose on the Ubuntu server (§1.2)
-- [ ] Install `fuse3` and enable `user_allow_other` (§1.3)
-- [ ] Install rclone and configure the `rewaveSP` remote (headless authorize) with the **M365 service account** (§2.1–2.2)
-- [ ] Verify read **and write** on the `/mnt/sharepoint` mount (§2.4)
-- [ ] Install and enable the `rclone-sharepoint` systemd service (§2.4)
-- [ ] `chmod 600` on `rclone.conf` and `.env` (§2.5, §3.2)
+- [ ] Install the abraunegg `onedrive` client (§1.3)
+- [ ] Create `/mnt/sharepoint` and `chown` it to the service user (§2.1)
+- [ ] Authenticate the onedrive client (headless) with the **M365 service account** (§2.2)
+- [ ] Find the SharePoint library `drive_id` and set it in `~/.config/onedrive/config` (§2.3–2.4)
+- [ ] Run the first full sync and verify files in `/mnt/sharepoint` (§2.5)
+- [ ] Verify write propagation to SharePoint (§2.6)
+- [ ] Install and enable the `onedrive-sharepoint` systemd service (keep `UMask=0022`) (§2.6)
+- [ ] Lock down `~/.config/onedrive` (`chmod 700`) and `.env` (`chmod 600`) (§2.7, §3.2)
 - [ ] Create the **production** `.env` with `SHAREPOINT_MOUNT_PATH=/mnt/sharepoint` (NOT the Windows path) (§3.2)
 - [ ] `docker compose up -d` and verify the bind-mount inside the container (§3.3–3.4)
 - [ ] Enable multi-user + create admin (§4)

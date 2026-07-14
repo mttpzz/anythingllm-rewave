@@ -1,6 +1,6 @@
 # Rewave Office Assistant — AnythingLLM + Claude + SharePoint
 
-Internal chat assistant for employees. Multi-user chat on **AnythingLLM** (self-hosted, Docker on Ubuntu), **Claude Sonnet 4.6** via the Anthropic API, **web search**, and access to a **SharePoint folder** (mounted as a local folder via `rclone` + the native File System agent).
+Internal chat assistant for employees. Multi-user chat on **AnythingLLM** (self-hosted, Docker on Ubuntu), **Claude Sonnet 4.6** via the Anthropic API, **web search**, and access to a **SharePoint folder** (synced to a local folder by a OneDrive client + the native File System agent).
 
 ## Architecture
 
@@ -9,7 +9,7 @@ Employees (browser) ─login─▶ AnythingLLM (Docker) ─API─▶ Anthropic (
                                 ├─ web-browsing skill ─▶ web search (DuckDuckGo)
                                 └─ File System skill  ─▶ /app/server/storage/anythingllm-fs/sharepoint
                                                           ▲ bind-mount
-Ubuntu:  /mnt/sharepoint  ◀─ rclone mount ─ SharePoint / M365
+Ubuntu:  /mnt/sharepoint  ◀─ onedrive client (abraunegg) sync ─ SharePoint / M365
 ```
 
 Tools (web + files) run **only in agent mode**: type `@agent ...` in chat. Plain chat only answers over documents uploaded into the workspace.
@@ -17,8 +17,8 @@ Tools (web + files) run **only in agent mode**: type `@agent ...` in chat. Plain
 ## Quick test on Windows (Docker Desktop)
 
 For the test phase the SharePoint folder is already synced by the OneDrive client:
-`C:\Users\Matteo\Rewave Srl\Rewave - Information Technology`. **No rclone** — OneDrive already
-does the sync. Just bind-mount that folder.
+`C:\Users\Matteo\Rewave Srl\Rewave - Information Technology`. The Microsoft OneDrive client
+already does the sync — just bind-mount that folder.
 
 ```bash
 # .env: ANTHROPIC_API_KEY + SHAREPOINT_MOUNT_PATH = the Windows path (no trailing slash)
@@ -32,26 +32,27 @@ docker compose up -d
 
 Then follow **UI configuration** below.
 
-> 📘 **Production**: for the full Ubuntu deploy (Docker, rclone, skills, HTTPS, checklist, and Windows/Ubuntu differences) follow **[PRODUCTION.md](PRODUCTION.md)**. The section below is the summary.
+> 📘 **Production**: for the full Ubuntu deploy (Docker, OneDrive sync, skills, HTTPS, checklist, and Windows/Ubuntu differences) follow **[PRODUCTION.md](PRODUCTION.md)**. The section below is the summary.
 
 ## Prerequisites (production, Ubuntu server)
 - Docker + Docker Compose
-- `rclone` (`curl https://rclone.org/install.sh | sudo bash`)
+- `onedrive` (abraunegg client — no official Microsoft Linux client exists; see PRODUCTION.md §1.3)
 - A dedicated Microsoft 365 service account with access **only** to the target library/folder
 - Anthropic API key (console.anthropic.com)
 
 ## Setup (production Ubuntu)
 
-### 1. rclone: mount SharePoint
+### 1. OneDrive client: sync SharePoint
 ```bash
-rclone config          # remote "rewaveSP", type OneDrive/SharePoint, pick site/library
-                       # headless host: rclone authorize "onedrive" from a PC with a browser
-sudo mkdir -p /mnt/sharepoint
-# enable user_allow_other in /etc/fuse.conf (for --allow-other)
-sudo cp deploy/rclone-sharepoint.service /etc/systemd/system/
-# adjust User/Group, rclone.conf path, and the "Documenti/CartellaTarget" path in the unit
+sudo mkdir -p /mnt/sharepoint && sudo chown ubuntu:ubuntu /mnt/sharepoint
+onedrive                                        # headless auth: open printed URL on a PC, sign in, paste response URL
+onedrive --get-O365-drive-id 'Rewave - Information Technology'   # get the library drive_id
+# put sync_dir=/mnt/sharepoint + drive_id in ~/.config/onedrive/config (see deploy/onedrive-config.example)
+onedrive --sync --verbose                       # first full sync
+sudo cp deploy/onedrive-sharepoint.service /etc/systemd/system/
+# adjust User/Group and --confdir in the unit; keep UMask=0022
 sudo systemctl daemon-reload
-sudo systemctl enable --now rclone-sharepoint
+sudo systemctl enable --now onedrive-sharepoint
 ls /mnt/sharepoint     # must show the library files
 ```
 
@@ -87,15 +88,16 @@ In chat, prefix file/web operations with **`@agent`** (you can write in Italian)
 Chat without `@agent` only answers over documents already uploaded into the workspace.
 
 ## Security and constraints
-- **Shared identity**: all employees act with the permissions of the rclone service account. Limit that account to the target SharePoint folder only.
+- **Shared identity**: all employees act with the permissions of the OneDrive service account. Limit that account to the target SharePoint folder only.
 - **Read + create**: the native AnythingLLM single read/write mount is used. The read/write File System agent can also **modify/delete** existing files — there is no "create-only" level; the constraint is enforced via the system prompt.
-- **Secrets**: `.env` and `rclone.conf` (mode 600) out of the repo. HTTPS on the reverse proxy, LAN/VPN access only. Rotate the API key and rclone token periodically.
-- **Sync/latency**: created files appear on SharePoint after the rclone cache flush; avoid concurrent edits on the same file.
+- **Secrets**: `.env` (mode 600) and `~/.config/onedrive/` (mode 700, holds the refresh token) out of the repo. HTTPS on the reverse proxy, LAN/VPN access only. Rotate the API key periodically; re-auth onedrive if the account credentials rotate.
+- **Sync/latency**: created files appear on SharePoint after the next onedrive monitor cycle; avoid concurrent edits on the same file (can produce conflict copies).
 
 ## Project files
 - `docker-compose.yml` — AnythingLLM + SharePoint folder bind-mount
 - `.env` — variables (Anthropic key, model, mount path); not committed
-- `deploy/rclone-sharepoint.service` — systemd unit for the rclone mount
+- `deploy/onedrive-sharepoint.service` — systemd unit for the onedrive sync (--monitor)
+- `deploy/onedrive-config.example` — example `~/.config/onedrive/config`
 - `PRODUCTION.md` — full production deployment guide (Ubuntu)
 - `README.md` — this file
 
@@ -110,4 +112,4 @@ Chat without `@agent` only answers over documents already uploaded into the work
 ## Notes / limitations
 - No structured editing inside existing DOCX/XLSX: the skill creates and reads files, it does not modify the internal content of Office documents.
 - DuckDuckGo (default) is free but variable in quality: consider a keyed search provider.
-- Very large libraries: tune `--dir-cache-time` and watch out for recursive search cost.
+- Very large libraries: the onedrive client syncs everything to local disk — use a `sync_list` to limit scope and watch disk usage.

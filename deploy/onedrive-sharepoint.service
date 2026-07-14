@@ -1,0 +1,39 @@
+# systemd unit to keep the SharePoint library synced to /mnt/sharepoint
+# via the abraunegg OneDrive client (https://github.com/abraunegg/onedrive).
+#
+# Install:
+#   sudo mkdir -p /mnt/sharepoint
+#   sudo chown ubuntu:ubuntu /mnt/sharepoint       # onedrive must own the sync dir
+#   sudo cp deploy/onedrive-sharepoint.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now onedrive-sharepoint
+#
+# Prerequisites:
+#   - onedrive installed (see PRODUCTION.md §1.3)
+#   - authenticated once:  onedrive        (headless: open the printed URL on a PC with a
+#     browser, sign in with the M365 service account, paste the response URL back)
+#   - config in ~/.config/onedrive/config with:
+#       sync_dir = "/mnt/sharepoint"
+#       drive_id = "<SharePoint library drive_id>"   (from: onedrive --get-O365-drive-id 'Library')
+#   - first full sync done once by hand:  onedrive --sync --verbose
+#
+# UMask 0022 => synced files are 644 / dirs 755, so the AnythingLLM container (non-root
+# user) can read the bind-mount. Keep sync_dir in this config == SHAREPOINT_MOUNT_PATH in .env.
+
+[Unit]
+Description=OneDrive sync SharePoint (Rewave) to /mnt/sharepoint
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Adjust User/Group to the server service account that ran `onedrive` auth.
+User=ubuntu
+Group=ubuntu
+UMask=0022
+ExecStart=/usr/bin/onedrive --monitor --confdir=/home/ubuntu/.config/onedrive
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

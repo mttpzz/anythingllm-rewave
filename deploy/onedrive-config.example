@@ -1,0 +1,21 @@
+# Example ~/.config/onedrive/config for the abraunegg OneDrive client.
+# Copy to ~/.config/onedrive/config and adjust drive_id.
+# Docs: https://github.com/abraunegg/onedrive/blob/master/docs/USAGE.md
+
+# Local folder kept in sync with the SharePoint library.
+# MUST match SHAREPOINT_MOUNT_PATH in the project .env (docker-compose bind-mount).
+sync_dir = "/mnt/sharepoint"
+
+# SharePoint document library to sync (NOT the personal OneDrive).
+# Get it with:  onedrive --get-O365-drive-id 'Rewave - Information Technology'
+drive_id = "PUT_SHAREPOINT_DRIVE_ID_HERE"
+
+# --- optional ---
+# Seconds between sync scans in --monitor mode (default 300).
+# monitor_interval = "300"
+
+# Limit which subfolders sync (saves disk on big libraries): use a sync_list file
+# instead — ~/.config/onedrive/sync_list, one path per line.
+
+# Skip patterns (comma-separated). Example: skip temp/hidden files.
+# skip_file = "~*|.~*|*.tmp|*.swp|*.partial"

@@ -3,7 +3,10 @@
 .env.*
 !.env.example
 storage/
-rclone.conf
+# onedrive client config/token lives in ~/.config/onedrive (outside repo);
+# ignore any local copy of the real config here (keep the .example)
+onedrive-config
+!deploy/onedrive-config.example
 recovery_codes.txt*
 *.secret
 *.pem

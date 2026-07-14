@@ -23,8 +23,8 @@ services:
       # MUST live under anythingllm-fs/: the skill cannot access anything outside it.
       # Long syntax is used so a Windows source path (drive-letter colon, spaces) works.
       # Host path comes from SHAREPOINT_MOUNT_PATH in .env:
-      #   Windows test -> OneDrive-synced SharePoint folder (no rclone)
-      #   Ubuntu prod  -> rclone mount point (/mnt/sharepoint)
+      #   Windows test -> Microsoft OneDrive-synced SharePoint folder
+      #   Ubuntu prod  -> abraunegg onedrive sync folder (/mnt/sharepoint)
       - type: bind
         source: ${SHAREPOINT_MOUNT_PATH}
         target: /app/server/storage/anythingllm-fs/sharepoint
