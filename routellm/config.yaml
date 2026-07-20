@@ -1,0 +1,17 @@
+# RouteLLM router definitions (from the upstream config.example.yaml).
+# Maps each router name to the pre-trained checkpoint / datasets it loads from HuggingFace.
+# The routers were trained on a GPT-4-vs-Mixtral preference dataset; the threshold (set in the
+# request model name, e.g. router-mf-0.11593) decides how much traffic goes to the strong model.
+sw_ranking:
+  arena_battle_datasets:
+    - lmsys/lmsys-arena-human-preference-55k
+    - routellm/gpt4_judge_battles
+  arena_embedding_datasets:
+    - routellm/arena_battles_embeddings
+    - routellm/gpt4_judge_battles_embeddings
+causal_llm:
+  checkpoint_path: routellm/causal_llm_gpt4_augmented
+bert:
+  checkpoint_path: routellm/bert_gpt4_augmented
+mf:
+  checkpoint_path: routellm/mf_gpt4_augmented

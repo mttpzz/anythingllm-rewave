@@ -171,12 +171,26 @@ e.g. into `/opt/anythingllm-rewave`.
 
 ```bash
 cat > .env <<'EOF'
-# Anthropic API key (console.anthropic.com)
+# Signs login session tokens. MUST be set here: AnythingLLM otherwise stores it in the
+# container's internal /app/server/.env, which is wiped on every recreate/rebuild -> login then
+# fails ("Could not validate login"). Setting it in compose makes it survive. Generate once with
+# `openssl rand -hex 32` and paste the result below.
+JWT_SECRET=REPLACE_WITH_openssl_rand_hex_32
+# Anthropic API key (console.anthropic.com) — read by RouteLLM (litellm) to call the models
 ANTHROPIC_API_KEY=sk-ant-xxxxxxxxxxxxxxxxxxxxxxxx
-# Default model
-ANTHROPIC_MODEL_PREF=claude-sonnet-4-6
 # SharePoint folder synced by the OneDrive client
 SHAREPOINT_MOUNT_PATH=/mnt/sharepoint
+# --- RouteLLM (complexity-based routing) — see §5
+ROUTELLM_ROUTER=bert                           # bert (fully local) | mf (needs OPENAI_API_KEY)
+ROUTELLM_THRESHOLD=0.11593                      # share of traffic to the strong model (calibrate, §5)
+ROUTELLM_STRONG_MODEL=anthropic/claude-sonnet-4-6   # complex tasks
+ROUTELLM_WEAK_MODEL=anthropic/claude-haiku-4-5      # simple/cheap tasks
+ROUTELLM_TEMPERATURE=0.3                             # fixed temperature forced on every request
+ROUTELLM_API_KEY=change-me-routellm-shared-secret   # shared secret AnythingLLM <-> RouteLLM
+OPENAI_API_KEY=                                 # only for the mf router embeddings; empty if bert
+GENERIC_OPEN_AI_MODEL_TOKEN_LIMIT=200000
+GENERIC_OPEN_AI_MAX_TOKENS=4096
+AGENT_AUTO_APPROVED_SKILLS=<all>                # auto-approve agent tools (no per-call confirm)
 EOF
 chmod 600 .env
 ```
@@ -185,9 +199,9 @@ On Ubuntu the path has no `C:` and no spaces, so the short volume syntax would a
 
 ### 3.3 Start
 ```bash
-docker compose pull
-docker compose up -d
-docker compose logs -f          # check it starts without errors (Ctrl-C to exit)
+docker compose pull                 # pulls the anythingllm + caddy images
+docker compose up -d --build        # --build compiles the local routellm image (routellm/)
+docker compose logs -f              # check it starts without errors (Ctrl-C to exit)
 ```
 UI reachable at `http://<server-IP>:3001` (LAN only for now). The bundled Caddy service already
 fronts it over HTTPS at the configured domain — see step 8 to finalize the domain, CA/cert, and
@@ -206,6 +220,11 @@ can't read the files → confirm `UMask=0022` on the onedrive service and re-syn
 
 > ▶ **Windows vs Ubuntu**: **identical** in both environments. There is no "create admin" wizard.
 
+> ⚠️ **Set `JWT_SECRET` in `.env` (§3.2).** AnythingLLM keeps its login-token secret in the
+> container's internal `/app/server/.env`, which a `--force-recreate`/rebuild wipes → login then
+> fails with "Could not validate login" (users/passwords survive in `./storage`; only the token
+> secret is lost). Providing it via compose env makes it stable across recreates.
+
 1. Open the UI.
 2. **Settings** menu (gear icon, bottom-left).
 3. **Security** section.
@@ -216,13 +235,79 @@ can't read the files → confirm `UMask=0022` on the onedrive service and re-syn
 
 ---
 
-## 5. LLM provider (Anthropic)
+## 5. LLM provider (RouteLLM — complexity-based routing)
 
-> ▶ **Windows vs Ubuntu**: identical. The model comes from `.env` (`ANTHROPIC_MODEL_PREF`).
+> ▶ **Windows vs Ubuntu**: identical. Everything comes from `.env`; nothing to pick in the UI.
 
-1. **Settings → LLM Preference → Anthropic**.
-2. Confirm the API key is picked up from the environment and the model is `claude-sonnet-4-6`.
-3. Save. Ask a basic question in chat to confirm it responds.
+AnythingLLM does **not** call Anthropic directly. It points at the **`routellm`** service (built from
+`routellm/`, no official image), an OpenAI-compatible gateway that scores each prompt and routes it
+to the **strong** model (complex tasks) or the **weak/cheap** model (simple tasks).
+
+**Data flow**: `AnythingLLM (generic-openai → http://routellm:6060/v1)` → `RouteLLM` → `litellm` →
+`Anthropic`. RouteLLM is internal only (port `6060`, not published); AnythingLLM reaches it by the
+container name on the compose network.
+
+### 5.1 Configure (`.env`)
+| Var | Meaning |
+|---|---|
+| `ROUTELLM_ROUTER` | `bert` (fully local, no OpenAI — current default) · `mf` (needs `OPENAI_API_KEY`) · `sw_ranking` · `causal_llm` |
+| `ROUTELLM_THRESHOLD` | Routing threshold. **For `bert`: HIGHER = more traffic to the WEAK/cheap model** (§5.2). Router-specific. |
+| `ROUTELLM_STRONG_MODEL` | litellm id, complex tasks — e.g. `anthropic/claude-sonnet-4-6` |
+| `ROUTELLM_WEAK_MODEL` | litellm id, simple tasks — e.g. `anthropic/claude-haiku-4-5` (or a local `ollama/...` = free) |
+| `ROUTELLM_TEMPERATURE` | Fixed temperature forced on every request (default `0.3`), overriding the client; `top_p` cleared server-side (`routellm/patch_schema.py`). |
+| `ROUTELLM_API_KEY` | Value for AnythingLLM's "API Key" field. RouteLLM does **not** validate inbound auth (internal-only), so any non-empty string. **Not** passed to RouteLLM as `--api-key` (would override the provider keys). |
+| `OPENAI_API_KEY` | Only for the `mf`/`sw_ranking` router embeddings (cheap). Empty with `bert`. |
+
+AnythingLLM requests the model `router-${ROUTELLM_ROUTER}-${ROUTELLM_THRESHOLD}` (e.g. `router-bert-0.46514`).
+
+### 5.2 Calibrate the threshold
+Calibrated `bert` thresholds (this deploy defaults to `0.46514` ≈ 30% strong / 70% weak):
+
+| Target strong-% | threshold |
+|---|---|
+| 20% | `0.50944` |
+| 30% | `0.46514` (default) |
+| 40% | `0.43431` |
+| 50% | `0.4066` |
+
+Recalibrate (runs in the container; `pandarallel` is baked in the image):
+```bash
+docker exec -it routellm python -m routellm.calibrate_threshold \
+  --task calibrate --routers bert --strong-model-pct 0.3 --config /app/config.yaml
+# prints the threshold for ~30% strong calls -> set ROUTELLM_THRESHOLD, then reconfigure AnythingLLM's model name
+```
+
+### 5.3 Verify
+1. `docker compose ps` → `routellm` reaches STATUS **`healthy`** (bert loads a HuggingFace model on
+   boot, **~2 min**). AnythingLLM waits for this via `depends_on: condition: service_healthy`, so it
+   only starts once the router is serving — no more failed first chats. Watch with `docker compose logs -f routellm`.
+2. In chat: a trivial prompt should hit the **weak** model; a hard one the **strong** model
+   (watch the `routellm` logs to see which model each request went to).
+3. ⚠️ **Test `@agent` explicitly** (file/web tools). Tool-calling must survive the
+   AnythingLLM → RouteLLM → litellm → Anthropic hops.
+
+### 5.4 Gotchas already handled in this repo
+Documented so nobody re-debugs them:
+- **`LITELLM_DROP_PARAMS=True`** (compose) — AnythingLLM sends `presence_penalty`/`frequency_penalty`; Anthropic rejects them → dropped.
+- **`temperature`+`top_p` both sent** — RouteLLM defaults both to `1.0`; newer Anthropic models reject the pair. `routellm/Dockerfile` patches those schema defaults to `None`.
+- **No `--api-key`** — in RouteLLM that flag is the *provider* key for all calls; setting it breaks Anthropic auth. Provider keys come from the env.
+- **Agent tool-calling → 422** — RouteLLM's schema is too strict for OpenAI tool-calling: `tools`/`tool_choice` reject nested function schemas AND `messages` rejects tool turns (assistant `tool_calls`, role `tool`). `@agent` hits both. `routellm/patch_schema.py` (run at build) relaxes all three (full loop + streaming verified).
+- **bert startup ~2 min** — see §5.3 step 1.
+
+### 5.5 Optional: LiteLLM in front (only if you need ops features)
+RouteLLM already calls the providers (uses litellm internally), so on a small internal deploy it is
+**enough on its own**. Add a **LiteLLM proxy** in front only if you need plumbing RouteLLM lacks:
+
+- **Virtual keys** — issue fake keys to AnythingLLM, hide the real provider keys
+- **Budget / spend tracking** — spend cap per user/team, cost reports
+- **Rate limiting** — cap requests
+- **Caching (Redis)** — repeated answers not recomputed
+- **Logging / observability** — audit of every call
+- **Fallback / load-balance** — across multiple deployments/keys
+- **Single auth** — one entry point for AnythingLLM
+
+Chain: `AnythingLLM → LiteLLM (keys/budget/logs) → RouteLLM (strong-vs-weak) → providers`.
+Not configured here — add a `litellm` service when these needs appear.
 
 ---
 
@@ -276,7 +361,7 @@ on Desktop). So:
 > ▶ **Windows vs Ubuntu**: identical.
 
 1. Create a **Workspace** "Office Assistant".
-2. Set the model (`claude-sonnet-4-6`).
+2. Leave the workspace model on the system default (Generic OpenAI → RouteLLM); routing is handled by RouteLLM, §5.
 3. **System prompt** (draft):
    ```
    You are Rewave's internal assistant. For files, use the SharePoint folder through the
@@ -340,7 +425,7 @@ any.rewave.local {
 
 1. `systemctl status onedrive-sharepoint` → active; `ls /mnt/sharepoint` → real files.
 2. `docker exec -it anythingllm ls /app/server/storage/anythingllm-fs/sharepoint` → same files.
-3. Basic chat → OK response (Anthropic, `claude-sonnet-4-6`).
+3. Basic chat → OK response (via RouteLLM; check `docker compose logs routellm` for the routed model).
 4. `@agent search the web for <recent news>` → results with sources.
 5. `@agent search the folder for <topic> and summarize <file>` → coherent summary.
 6. `@agent create test-prod.txt with "hello" in the folder` → the file appears in
@@ -366,7 +451,7 @@ Things you did not do in Windows test (or did differently) that must be done in 
 - [ ] Create the **production** `.env` with `SHAREPOINT_MOUNT_PATH=/mnt/sharepoint` (NOT the Windows path) (§3.2)
 - [ ] `docker compose up -d` and verify the bind-mount inside the container (§3.3–3.4)
 - [ ] Enable multi-user + create admin (§4)
-- [ ] Verify the Anthropic provider + model (§5)
+- [ ] Configure RouteLLM (`.env`), calibrate the threshold, verify routing + `@agent` tool-calling (§5)
 - [ ] **Enable the Agent Skills by hand** (File system access = required; the others optional; SQL = Off) (§6)
 - [ ] Verify the `sharepoint` bind-mount is visible in the container (on Docker the File System skill has no folder config in the UI: read/write depends on the volume) (§3.4, §6.1)
 - [ ] Create the workspace + system prompt with the no-modify/no-delete guard-rail (§7)
@@ -383,7 +468,20 @@ memory on every reinstall:
    `./storage/anythingllm.db` (array of skill ids).
 3. Save that value as a reference (or seed script) for future redeploys.
 
-### (Optional) Tool auto-approval
-Adding `AGENT_AUTO_APPROVED_SKILLS=<all>` to `.env` makes tools run **without** asking for
-confirmation each time. Convenient, but it reduces human control over file creation: consider it
-only after validating the behavior in testing.
+### Tool auto-approval (enabled)
+`AGENT_AUTO_APPROVED_SKILLS` in `.env` controls which agent tools run **without** the per-call
+"yes" confirmation. Comma-separated skill names, or `<all>`. **This deploy uses `<all>`** — every
+tool (file write/edit/move, charts, web, …) runs silently.
+> ⚠️ With `<all>` there is **no human confirmation on file writes** to the SharePoint-synced
+> folder; the "do not modify/delete existing files" rule then relies **only** on the workspace
+> system prompt (§7). For tighter control, list only specific skills instead, e.g.
+> `AGENT_AUTO_APPROVED_SKILLS=filesystem-write-text-file`.
+
+### Saving files into the SharePoint folder (constraints)
+- Use the **File System** tool `filesystem-write-text-file`; the model must write to a path under
+  **`sharepoint/`** (e.g. `sharepoint/riepilogo.md`) — only that subfolder is bind-mounted/synced.
+  A bare `report.md` lands in `anythingllm-fs/` (container storage), **not** SharePoint.
+- **Text only** (md/csv/json/txt). `create-excel-file`/charts only produce **downloads**, they do
+  not write to the folder, and there is no bridge to move them in. For tabular data → **CSV**.
+- Steer this in the workspace **system prompt** (tell it to save under `sharepoint/` with the File
+  System tool, in text/CSV; not to use download tools for folder saves).
