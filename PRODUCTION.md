@@ -189,7 +189,9 @@ docker compose pull
 docker compose up -d
 docker compose logs -f          # check it starts without errors (Ctrl-C to exit)
 ```
-UI reachable at `http://<server-IP>:3001` (LAN only for now; HTTPS at step 8).
+UI reachable at `http://<server-IP>:3001` (LAN only for now). The bundled Caddy service already
+fronts it over HTTPS at the configured domain — see step 8 to finalize the domain, CA/cert, and
+firewall.
 
 ### 3.4 Verify the bind-mount inside the container
 ```bash
@@ -288,18 +290,32 @@ on Desktop). So:
 
 ---
 
-## 8. Reverse proxy + HTTPS (production only)
+## 8. Reverse proxy + HTTPS (Caddy, bundled)
 
-> ▶ **Windows vs Ubuntu**: in Windows test you use `http://localhost:3001` with no proxy. In
-> **production** always put HTTPS in front and do not expose port 3001 in the clear.
+> ▶ **Windows vs Ubuntu**: the **Caddy** service is part of `docker-compose.yml` in **both**
+> environments — no separate host install. What differs is only the cert source: a `.local`
+> domain uses Caddy's **internal CA** (self-signed, trust it on each client); a **real public
+> domain** lets Caddy fetch a **Let's Encrypt** cert automatically (no manual trust).
 
-- Install a reverse proxy (Caddy recommended for automatic HTTPS, or Nginx + certbot).
-- Example `Caddyfile`:
+The proxy config lives in `caddy/Caddyfile`:
+```
+any.rewave.local {
+    tls internal
+    reverse_proxy anythingllm:3001
+}
+```
+- `reverse_proxy anythingllm:3001` uses the **container name** on the compose network — not
+  `localhost` (Caddy runs in its own container).
+- **Windows test**: port **443 only** is published (port 80 is reserved by Windows `http.sys`);
+  internal-CA TLS needs no port 80. Point the domain at the host and trust the CA once:
+  ```powershell
+  Add-Content "$env:SystemRoot\System32\drivers\etc\hosts" "`n127.0.0.1`tany.rewave.local"
+  docker cp caddy-any:/data/caddy/pki/authorities/local/root.crt ./caddy/caddy-root.crt
+  certutil -addstore -f Root "caddy\caddy-root.crt"    # admin PowerShell
   ```
-  assistente.rewave.local {
-      reverse_proxy localhost:3001
-  }
-  ```
+- **Production (real domain)**: change the domain in `caddy/Caddyfile` and **remove
+  `tls internal`** so Caddy auto-provisions a Let's Encrypt cert; re-add the `"80:80"` port
+  mapping in `docker-compose.yml` (needed for the HTTP-01 challenge and the HTTP→HTTPS redirect).
 - Restrict access to the **internal network / VPN** (firewall: close 3001 from outside, expose
   only the proxy's 443).
 
@@ -355,7 +371,7 @@ Things you did not do in Windows test (or did differently) that must be done in 
 - [ ] Verify the `sharepoint` bind-mount is visible in the container (on Docker the File System skill has no folder config in the UI: read/write depends on the volume) (§3.4, §6.1)
 - [ ] Create the workspace + system prompt with the no-modify/no-delete guard-rail (§7)
 - [ ] Create the employee accounts (Default role) (§7)
-- [ ] Put a reverse proxy + HTTPS in place, close 3001 from outside (§8)
+- [ ] Set the domain in `caddy/Caddyfile` + HTTPS (drop `tls internal` and re-add port 80 for a real domain), close 3001 from outside (§8)
 - [ ] Set up backups of `./storage` and secret rotation (§9)
 - [ ] Run the full end-to-end verification (§10)
 

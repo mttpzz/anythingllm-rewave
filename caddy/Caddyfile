@@ -1,0 +1,8 @@
+# Reverse proxy for AnythingLLM.
+# any.rewave.local -> anythingllm container (port 3001).
+# `tls internal`: Caddy issues a cert from its own local CA (self-signed).
+# Trust that CA once on the client (see PRODUCTION.md / README) to drop browser warnings.
+any.rewave.local {
+	tls internal
+	reverse_proxy anythingllm:3001
+}

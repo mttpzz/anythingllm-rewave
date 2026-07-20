@@ -5,7 +5,7 @@ Internal chat assistant for employees. Multi-user chat on **AnythingLLM** (self-
 ## Architecture
 
 ```
-Employees (browser) ─login─▶ AnythingLLM (Docker) ─API─▶ Anthropic (claude-sonnet-4-6)
+Employees (browser) ─https─▶ Caddy proxy (any.rewave.local) ─▶ AnythingLLM (Docker) ─API─▶ Anthropic (claude-sonnet-4-6)
                                 ├─ web-browsing skill ─▶ web search (DuckDuckGo)
                                 └─ File System skill  ─▶ /app/server/storage/anythingllm-fs/sharepoint
                                                           ▲ bind-mount
@@ -23,12 +23,23 @@ already does the sync — just bind-mount that folder.
 ```bash
 # .env: ANTHROPIC_API_KEY + SHAREPOINT_MOUNT_PATH = the Windows path (no trailing slash)
 docker compose up -d
-# UI at http://localhost:3001
+# UI at http://localhost:3001  — or https://any.rewave.local via the bundled Caddy proxy (see below)
 ```
 - `docker-compose.yml` uses the long volume syntax so the Windows path (drive-letter `C:` and spaces) works.
 - If Docker Desktop rejects backslashes, use forward slashes in `.env`: `C:/Users/Matteo/Rewave Srl/Rewave - Information Technology`.
 - Make sure the folder is shared in Docker Desktop → Settings → Resources → File Sharing.
 - Files the agent creates land in the local folder and OneDrive syncs them up to SharePoint.
+
+### Domain access via Caddy (optional, mirrors production)
+`docker compose up -d` also starts a **Caddy** reverse proxy (`caddy/Caddyfile`) so the UI is reachable at **`https://any.rewave.local`** instead of `localhost:3001`, with TLS from Caddy's internal CA. One-time client setup:
+```powershell
+# 1. resolve the domain to localhost (admin PowerShell)
+Add-Content "$env:SystemRoot\System32\drivers\etc\hosts" "`n127.0.0.1`tany.rewave.local"
+# 2. extract Caddy's internal CA and trust it (admin PowerShell, no dialog)
+docker cp caddy-any:/data/caddy/pki/authorities/local/root.crt ./caddy/caddy-root.crt
+certutil -addstore -f Root "caddy\caddy-root.crt"
+```
+Restart the browser, open `https://any.rewave.local`. Caddy listens on **443 only** here (port 80 is reserved by Windows `http.sys` and not needed for internal-CA TLS). The extracted CA (`caddy/caddy-root.crt`) is git-ignored.
 
 Then follow **UI configuration** below.
 
@@ -60,7 +71,9 @@ ls /mnt/sharepoint     # must show the library files
 ```bash
 # .env: ANTHROPIC_API_KEY + SHAREPOINT_MOUNT_PATH=/mnt/sharepoint
 docker compose up -d
-# UI at http://SERVER:3001  (put an HTTPS reverse proxy in front, LAN/VPN access only)
+# UI at http://SERVER:3001 — the bundled Caddy proxy fronts HTTPS (LAN/VPN access only); on a
+# real domain drop `tls internal` in caddy/Caddyfile so Caddy auto-fetches a Let's Encrypt cert
+
 ```
 **Admin and multi-user**: there is no first-boot wizard. Go to **Settings (gear, bottom-left) → Security → Multi-User Mode**, toggle it on: the username/password fields for the **first admin** appear. From there create the employee accounts (Admin/Manager/Default roles). Note: multi-user is **irreversible**.
 
@@ -94,7 +107,8 @@ Chat without `@agent` only answers over documents already uploaded into the work
 - **Sync/latency**: created files appear on SharePoint after the next onedrive monitor cycle; avoid concurrent edits on the same file (can produce conflict copies).
 
 ## Project files
-- `docker-compose.yml` — AnythingLLM + SharePoint folder bind-mount
+- `docker-compose.yml` — AnythingLLM + SharePoint folder bind-mount + Caddy reverse proxy
+- `caddy/Caddyfile` — Caddy config: `any.rewave.local` → `anythingllm:3001`, internal-CA TLS
 - `.env` — variables (Anthropic key, model, mount path); not committed
 - `deploy/onedrive-sharepoint.service` — systemd unit for the onedrive sync (--monitor)
 - `deploy/onedrive-config.example` — example `~/.config/onedrive/config`

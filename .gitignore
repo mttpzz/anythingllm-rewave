@@ -11,6 +11,9 @@ recovery_codes.txt*
 *.secret
 *.pem
 *.key
+# Caddy internal CA extracted for local trust (generated per-host, not config)
+caddy/caddy-root.crt
+*.crt
 
 # ─── OS ───
 .DS_Store

@@ -28,3 +28,27 @@ services:
       - type: bind
         source: ${SHAREPOINT_MOUNT_PATH}
         target: /app/server/storage/anythingllm-fs/sharepoint
+
+  # Reverse proxy: exposes AnythingLLM at https://any.rewave.local (internal CA).
+  # In production this also fronts HTTPS; in the Windows test it lets you use the
+  # domain instead of localhost:3001. Config in caddy/Caddyfile.
+  caddy:
+    image: caddy:2-alpine
+    container_name: caddy-any
+    restart: unless-stopped
+    ports:
+      # Port 80 omitted: reserved by Windows http.sys on this host, and internal
+      # TLS (.local) needs no ACME/HTTP-challenge. On prod re-add "80:80" for the
+      # HTTP->HTTPS redirect + Let's Encrypt challenge.
+      - "443:443"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Persist the local CA + issued certs across restarts (keeps the trusted CA stable).
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - anythingllm
+
+volumes:
+  caddy_data:
+  caddy_config:
