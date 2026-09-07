@@ -16,7 +16,7 @@ differs:
 |---|---|---|
 | Who syncs SharePoint ↔ local folder | **OneDrive** client (Microsoft, already installed) | **abraunegg/onedrive** (open-source Linux client) |
 | Sync type | real local sync (files on disk) | real local sync (files on disk) |
-| Host folder | `C:\Users\Matteo\Rewave Srl\Rewave - Information Technology` | `/mnt/sharepoint` |
+| Host folder | `<local OneDrive sync folder>` | `/mnt/sharepoint` |
 | `SHAREPOINT_MOUNT_PATH` in `.env` | that Windows path | `/mnt/sharepoint` |
 | Bind-mount into the container | same | same |
 | Path seen by the agent in the container | `/app/server/storage/anythingllm-fs/sharepoint` | same |

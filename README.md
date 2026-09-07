@@ -19,7 +19,7 @@ Tools (web + files) run **only in agent mode**: type `@agent ...` in chat. Plain
 ## Quick test on Windows (Docker Desktop)
 
 For the test phase the SharePoint folder is already synced by the OneDrive client:
-`C:\Users\Matteo\Rewave Srl\Rewave - Information Technology`. The Microsoft OneDrive client
+`<local OneDrive sync folder>`. The Microsoft OneDrive client
 already does the sync — just bind-mount that folder.
 
 ```bash
@@ -28,7 +28,7 @@ docker compose up -d
 # UI at http://localhost:3001  — or https://any.rewave.local via the bundled Caddy proxy (see below)
 ```
 - `docker-compose.yml` uses the long volume syntax so the Windows path (drive-letter `C:` and spaces) works.
-- If Docker Desktop rejects backslashes, use forward slashes in `.env`: `C:/Users/Matteo/Rewave Srl/Rewave - Information Technology`.
+- If Docker Desktop rejects backslashes, use forward slashes in `.env`.
 - Make sure the folder is shared in Docker Desktop → Settings → Resources → File Sharing.
 - Files the agent creates land in the local folder and OneDrive syncs them up to SharePoint.
 
@@ -200,3 +200,7 @@ Chain would be `AnythingLLM → LiteLLM (keys/budget/logs) → RouteLLM (strong-
 - No structured editing inside existing DOCX/XLSX: the skill creates and reads files, it does not modify the internal content of Office documents.
 - DuckDuckGo (default) is free but variable in quality: consider a keyed search provider.
 - Very large libraries: the onedrive client syncs everything to local disk — use a `sync_list` to limit scope and watch disk usage.
+
+## License
+
+Source-available under the [PolyForm Strict License 1.0.0](LICENSE) — viewing and personal/noncommercial evaluation only. Any other use requires permission from Rewave Srl.
